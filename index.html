@@ -67,6 +67,8 @@
   <label title="Chance of continuing in the same direction">Momentum <input id="momentum" type="range" min="0" max="1" step="0.05" value="0.5"><output></output></label>
   <button id="regen">New graph</button><br>
   <label><input id="score" type="checkbox" checked> Listen &amp; score</label>
+  <label title="Synth plays each target note (free mode: the chord on each bar). Scoring is off while this is on, since the mic would hear it.">
+    <input id="play" type="checkbox"> Play aloud</label>
   <label><input id="rec" type="checkbox"> Record audio</label>
   <label title="Added on top of the browser's reported output latency. Raise if notes played on time score late or wrong (Bluetooth: ~200)">Latency +ms <input id="latency" type="number" value="30"></label>
   <label title="Mic level below this counts as silence">Mic gate <input id="gate" type="number" step="0.005" min="0" value="0.01"></label>
@@ -94,7 +96,7 @@ const load = (k, d) => { try { return JSON.parse(localStorage[k]) ?? d; } catch 
 const PASS = 0.85, MIN_LOOPS = 4, RATES = { 0.25: 'whole', 0.5: 'half', 1: 'quarter', 2: '8th', 3: 'triplet', 4: '16th' };
 
 // --- settings persistence ---
-const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'rec', 'latency', 'gate'];
+const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'play', 'rec', 'latency', 'gate'];
 const saved = load('arpSettings', {});
 const prop = el => el.type === 'checkbox' ? 'checked' : 'value';
 for (const id of IDS) {
@@ -130,7 +132,7 @@ function rebuild() {
 }
 ['chords', 'low', 'oct', 'leap'].forEach(id => $(id).addEventListener('change', rebuild));
 $('regen').onclick = () => { seed++; rebuild(); };
-['bpm', 'rate', 'mode', 'repeat', 'momentum', 'score', 'rec', 'latency'].forEach(id => $(id).addEventListener('change', () => run && stop()));
+['bpm', 'rate', 'mode', 'repeat', 'momentum', 'score', 'play', 'rec', 'latency'].forEach(id => $(id).addEventListener('change', () => run && stop()));
 
 // Each chord is an island (column) in progression order; within it, higher notes sit higher,
 // zig-zagged with a little seeded jitter so links between notes don't overlap.
@@ -183,6 +185,15 @@ function releaseMic() {
   if (!mic || run || tunerOn) return;
   mic.getTracks().forEach(t => t.stop()); mic = analyser = null;
 }
+// Plucked-ish synth note: triangle wave with a fast decay.
+function tone(m, t, dur, out, vol = 0.25) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = 'triangle'; o.frequency.value = 440 * 2 ** ((m - 69) / 12);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.005);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(out); o.start(t); o.stop(t + dur);
+}
+
 // Filtered noise tick: no pitch, so mic bleed can't be heard as a note.
 function click(t, accent, out) {
   if (!noise) {
@@ -200,7 +211,7 @@ async function start() {
   starting = true;
   try {
     await audio();
-    if ($('score').checked || $('rec').checked) await ensureMic();
+    if (($('score').checked && !$('play').checked) || $('rec').checked) await ensureMic();
   } catch (e) { $('status').textContent = 'Mic: ' + e.message; return; }
   finally { starting = false; }
   const bpm = +$('bpm').value, rate = +$('rate').value, bar = 240 / bpm, n = Math.round(4 * rate);
@@ -208,7 +219,7 @@ async function start() {
   const t0 = ctx.currentTime + 0.15 + bar; // one bar count-in
   for (let k = 0; k < 4; k++) click(t0 - bar + k * bar / 4, k === 0, out);
   run = {
-    bpm, rate, bar, n, d: bar / n, t0, out, nextBar: 0, slots: [], cur: -1, mode: $('mode').value, score: $('score').checked,
+    bpm, rate, bar, n, d: bar / n, t0, out, nextBar: 0, slots: [], cur: -1, mode: $('mode').value, score: $('score').checked && !$('play').checked, play: $('play').checked,
     walk: makeWalker(G, { repeat: +$('repeat').value, momentum: +$('momentum').value }, Math.random),
     chordsStr: chords.map(c => c.name).join(' '),
     off: (ctx.outputLatency || 0) + (ctx.baseLatency || 0) + $('latency').value / 1000, // click -> ear -> mic
@@ -233,8 +244,15 @@ function schedule() {
   while (r.t0 + r.nextBar * r.bar < ctx.currentTime + r.bar + 0.2) {
     const b = r.nextBar++, ci = b % chords.length, t = r.t0 + b * r.bar;
     for (let k = 0; k < 4; k++) click(t + k * r.bar / 4, k === 0, r.out);
-    for (let k = 0; k < r.n; k++)
-      r.slots.push({ t: t + k * r.d, d: r.d, ci, target: r.mode === 'guided' ? r.walk(ci) : null, hit: null, heard: false });
+    for (let k = 0; k < r.n; k++) {
+      const s = { t: t + k * r.d, d: r.d, ci, target: r.mode === 'guided' ? r.walk(ci) : null, hit: null, heard: false };
+      r.slots.push(s);
+      if (r.play && s.target !== null) tone(s.target, s.t, Math.min(Math.max(s.d * 1.5, 0.25), 1.5), r.out);
+    }
+    if (r.play && r.mode === 'free') { // free mode: the chord, voiced from the 2nd octave of the range
+      const isl = G.islands[ci], mid = isl.filter(m => m >= G.low + 12 && m < G.low + 24);
+      (mid.length ? mid : isl.slice(0, 4)).forEach(m => tone(m, t, Math.min(r.bar, 2), r.out, 0.12));
+    }
   }
 }
 
