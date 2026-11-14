@@ -126,7 +126,7 @@ export function summarize(slots) {
   };
 }
 
-export const KEYS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+export const KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'Gb', 'Db', 'Ab', 'Eb', 'Bb', 'F']; // circle of fifths
 export const TEMPLATES = { // [semitones above key, quality]; minor templates use the minor tonic as key
   'V–I': [[7, '7'], [0, 'maj7']],
   'ii–V–I': [[2, 'm7'], [7, '7'], [0, 'maj7']],

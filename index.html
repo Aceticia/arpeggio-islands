@@ -9,8 +9,12 @@
   fieldset { border: 1px solid var(--dim); border-radius: 6px; margin: 8px 0; line-height: 2.2; }
   label { margin-right: 14px; white-space: nowrap; }
   input[type=number] { width: 4.5em; }
-  button { font-size: 14px; }
-  #go { font-size: 18px; padding: 4px 18px; }
+  button { font: inherit; padding: 3px 12px; border-radius: 6px; border: 1px solid var(--dim); background: #8882; color: inherit; cursor: pointer; }
+  button:hover { background: #8884; }
+  #go, #save { background: var(--acc); border-color: transparent; color: #fff; }
+  #go { font-size: 18px; padding: 5px 22px; }
+  #result { padding: 8px 12px; border: 1px solid var(--dim); border-radius: 6px; }
+  #result:empty { display: none; }
   #now { font-size: 44px; font-weight: 600; min-height: 60px; margin: 8px 0; }
   #now small, #heard { font-size: 20px; font-weight: 400; opacity: .7; }
   #status { color: #d33; }
@@ -214,11 +218,15 @@ function stop() {
   const judged = ctx.currentTime - $('lat').value / 1000, done = r.slots.filter(s => s.t + s.d <= judged);
   if (done.length < 8) { $('result').textContent = 'Too short to score.'; return; }
   const e = { d: new Date().toISOString(), chords: r.chordsStr, bpm: r.bpm, rate: r.rate, mode: r.mode, ...summarize(done) };
-  log.push(e); localStorage.arpLog = JSON.stringify(log);
   const pct = k => Math.round(100 * e[k] / e.n) + '%', ok = e.hit / e.n >= PASS;
   $('result').innerHTML = `<b>${pct('hit')} hit</b> · ${pct('wrong')} wrong · ${pct('silent')} silent · reaction ${e.lat ?? '–'} ms — ` +
-    (ok ? `passed! Next: ${r.bpm + 5} BPM, or the next subdivision.` : `below ${PASS * 100}%: stay here or slow down.`);
-  renderProgress();
+    (ok ? `passed! Next: ${r.bpm + 5} BPM, or the next subdivision.` : `below ${PASS * 100}%: stay here or slow down.`) +
+    ' <button id="save">Save to log</button> <button id="discard">Discard</button>';
+  $('save').onclick = () => {
+    log.push(e); localStorage.arpLog = JSON.stringify(log); renderProgress();
+    $('discard').remove(); $('save').replaceWith('✓ saved');
+  };
+  $('discard').onclick = () => $('result').replaceChildren();
 }
 
 function show(i) {
