@@ -11,10 +11,9 @@
   input[type=number] { width: 4.5em; }
   button { font: inherit; padding: 3px 12px; border-radius: 6px; border: 1px solid var(--dim); background: #8882; color: inherit; cursor: pointer; }
   button:hover { background: #8884; }
-  #go, #save { background: var(--acc); border-color: transparent; color: #fff; }
+  #go, .save { background: var(--acc); border-color: transparent; color: #fff; }
   #go { font-size: 18px; padding: 5px 22px; }
-  #result { padding: 8px 12px; border: 1px solid var(--dim); border-radius: 6px; }
-  #result:empty { display: none; }
+  .result { padding: 8px 12px; border: 1px solid var(--dim); border-radius: 6px; margin: 8px 0; }
   #now { font-size: 44px; font-weight: 600; min-height: 60px; margin: 8px 0; }
   #now small, #heard { font-size: 20px; font-weight: 400; opacity: .7; }
   #status { color: #d33; }
@@ -60,7 +59,7 @@
   <button id="regen">New graph</button><br>
   <label><input id="score" type="checkbox" checked> Listen &amp; score</label>
   <label><input id="rec" type="checkbox"> Record audio</label>
-  <label title="Click-to-mic round trip; raise if correct notes score late/wrong">Latency ms <input id="lat" type="number" value="60"></label>
+  <label title="Added on top of the browser's reported output latency. Raise if notes played on time score late or wrong (Bluetooth: ~200)">Latency +ms <input id="latency" type="number" value="30"></label>
   <label title="Mic level below this counts as silence">Mic gate <input id="gate" type="number" step="0.005" min="0" value="0.01"></label>
 </fieldset>
 <button id="go">Start</button> <button id="tunerBtn">Tuner</button>
@@ -68,22 +67,23 @@
 <span id="heard"></span> <span id="status"></span>
 <div id="now"></div>
 <div class="wrap"><svg id="graph"></svg></div>
-<p id="result"></p>
+<div id="results"></div>
 <h3>Progress <small id="streak"></small></h3>
-<p><small>Best notes/min (BPM × notes per beat) with ≥85% hits. Click a cell to load it.</small></p>
+<p><small>Best notes/min (BPM × notes per beat) in guided sessions of ≥4 loops with ≥85% hits. Click a cell to load it.</small></p>
 <div id="grid"></div>
 <h3>Recent</h3>
 <div id="hist"></div>
 
 <script type="module">
-import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, TEMPLATES, KEYS, transpose } from './core.js';
+import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, TEMPLATES, KEYS, transpose, rms, makeOnsets, noteLabel } from './core.js';
 
 const $ = id => document.getElementById(id);
-const PASS = 0.85, RATES = { 0.25: 'whole', 0.5: 'half', 1: 'quarter', 2: '8th', 3: 'triplet', 4: '16th' };
+const load = (k, d) => { try { return JSON.parse(localStorage[k]) ?? d; } catch { return d; } };
+const PASS = 0.85, MIN_LOOPS = 4, RATES = { 0.25: 'whole', 0.5: 'half', 1: 'quarter', 2: '8th', 3: 'triplet', 4: '16th' };
 
 // --- settings persistence ---
-const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'rec', 'lat', 'gate'];
-const saved = JSON.parse(localStorage.arpSettings ?? '{}');
+const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'rec', 'latency', 'gate'];
+const saved = load('arpSettings', {});
 const prop = el => el.type === 'checkbox' ? 'checked' : 'value';
 for (const id of IDS) {
   const el = $(id);
@@ -100,7 +100,7 @@ $('rndKey').onclick = () => { $('key').value = KEYS[Math.floor(Math.random() * 1
 
 // --- graph ---
 let seed = Date.now() % 1e9, G = null, chords = [];
-const label = (ci, m) => chords[ci].names[m % 12] + (Math.floor(m / 12) - 1);
+const label = (ci, m) => noteLabel(chords[ci], m);
 
 function rebuild() {
   if (run) stop();
@@ -114,6 +114,7 @@ function rebuild() {
 }
 ['chords', 'low', 'oct', 'leap'].forEach(id => $(id).addEventListener('change', rebuild));
 $('regen').onclick = () => { seed++; rebuild(); };
+['bpm', 'rate', 'mode', 'repeat', 'momentum', 'score', 'rec', 'latency'].forEach(id => $(id).addEventListener('change', () => run && stop()));
 
 // Each chord is an island (column) in progression order; within it, higher notes sit higher,
 // zig-zagged with a little seeded jitter so links between notes don't overlap.
@@ -153,7 +154,7 @@ function draw() {
 }
 
 // --- audio ---
-let ctx, mic, analyser, buf, run = null, tunerOn = false, prevMidi = null;
+let ctx, mic, analyser, buf, noise, run = null, starting = false, tunerOn = false, onsets = makeOnsets();
 const audio = async () => { ctx ??= new AudioContext(); await ctx.resume(); };
 async function ensureMic() {
   await audio();
@@ -162,20 +163,30 @@ async function ensureMic() {
   analyser = ctx.createAnalyser(); analyser.fftSize = 2048; buf = new Float32Array(2048);
   ctx.createMediaStreamSource(mic).connect(analyser);
 }
+function releaseMic() {
+  if (!mic || run || tunerOn) return;
+  mic.getTracks().forEach(t => t.stop()); mic = analyser = null;
+}
+// Filtered noise tick: no pitch, so mic bleed can't be heard as a note.
 function click(t, accent, out) {
-  const o = ctx.createOscillator(), g = ctx.createGain();
-  o.frequency.value = accent ? 1500 : 1000;
-  g.gain.setValueAtTime(accent ? 0.5 : 0.25, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
-  o.connect(g).connect(out); o.start(t); o.stop(t + 0.05);
+  if (!noise) {
+    noise = ctx.createBuffer(1, Math.round(ctx.sampleRate * 0.03), ctx.sampleRate);
+    const d = noise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 4;
+  }
+  const src = ctx.createBufferSource(), hp = ctx.createBiquadFilter(), g = ctx.createGain();
+  src.buffer = noise; hp.type = 'highpass'; hp.frequency.value = accent ? 1200 : 3000; g.gain.value = accent ? 1 : 0.7;
+  src.connect(hp).connect(g).connect(out); src.start(t);
 }
 
 async function start() {
-  if (!G) return;
+  if (!G || starting) return;
+  starting = true;
   try {
     await audio();
     if ($('score').checked || $('rec').checked) await ensureMic();
   } catch (e) { $('status').textContent = 'Mic: ' + e.message; return; }
+  finally { starting = false; }
   const bpm = +$('bpm').value, rate = +$('rate').value, bar = 240 / bpm, n = Math.round(4 * rate);
   const out = ctx.createGain(); out.connect(ctx.destination);
   const t0 = ctx.currentTime + 0.15 + bar; // one bar count-in
@@ -184,18 +195,20 @@ async function start() {
     bpm, rate, bar, n, d: bar / n, t0, out, nextBar: 0, slots: [], cur: -1, mode: $('mode').value, score: $('score').checked,
     walk: makeWalker(G, { repeat: +$('repeat').value, momentum: +$('momentum').value }, Math.random),
     chordsStr: chords.map(c => c.name).join(' '),
+    off: (ctx.outputLatency || 0) + (ctx.baseLatency || 0) + $('latency').value / 1000, // click -> ear -> mic
   };
   if ($('rec').checked) {
     const rec = new MediaRecorder(mic), chunks = [], stamp = new Date().toISOString().slice(0, 16).replace(':', '');
     rec.ondataavailable = e => chunks.push(e.data);
+    const r = run;
     rec.onstop = () => {
-      const url = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType }));
-      $('result').insertAdjacentHTML('beforeend', ` <a download="arp-${stamp}.${rec.mimeType.includes('mp4') ? 'm4a' : 'webm'}" href="${url}">Download recording</a>`);
+      r.card.url = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType }));
+      r.card.querySelector('.x').insertAdjacentHTML('beforebegin', `<a download="arp-${stamp}.${rec.mimeType.includes('mp4') ? 'm4a' : 'webm'}" href="${r.card.url}">Download recording</a> `);
     };
-    rec.start(); run.rec = rec;
+    rec.start(); r.rec = rec;
   }
   run.timer = setInterval(schedule, 25); schedule();
-  $('go').textContent = 'Stop'; $('result').textContent = '';
+  $('go').textContent = 'Stop';
 }
 
 // Keep the current and next bar generated so the next notes can be shown ahead of time.
@@ -209,24 +222,27 @@ function schedule() {
   }
 }
 
+// Each run gets its own result card (kept until closed), so a quick restart loses nothing.
 function stop() {
   const r = run; run = null;
-  clearInterval(r.timer); r.out.disconnect(); r.rec?.stop();
+  clearInterval(r.timer); r.out.disconnect();
   document.querySelectorAll('#graph .cur, #graph .nxt, #graph .on').forEach(e => e.classList.remove('cur', 'nxt', 'on'));
   $('now').textContent = ''; $('heard').textContent = ''; $('go').textContent = 'Start';
-  if (!r.score) return;
-  const judged = ctx.currentTime - $('lat').value / 1000, done = r.slots.filter(s => s.t + s.d <= judged);
-  if (done.length < 8) { $('result').textContent = 'Too short to score.'; return; }
+  const done = r.slots.filter(s => s.t + s.d <= ctx.currentTime - r.off);
   const e = { d: new Date().toISOString(), chords: r.chordsStr, bpm: r.bpm, rate: r.rate, mode: r.mode, ...summarize(done) };
   const pct = k => Math.round(100 * e[k] / e.n) + '%', ok = e.hit / e.n >= PASS;
-  $('result').innerHTML = `<b>${pct('hit')} hit</b> · ${pct('wrong')} wrong · ${pct('silent')} silent · reaction ${e.lat ?? '–'} ms — ` +
-    (ok ? `passed! Next: ${r.bpm + 5} BPM, or the next subdivision.` : `below ${PASS * 100}%: stay here or slow down.`) +
-    ' <button id="save">Save to log</button> <button id="discard">Discard</button>';
-  $('save').onclick = () => {
-    log.push(e); localStorage.arpLog = JSON.stringify(log); renderProgress();
-    $('discard').remove(); $('save').replaceWith('✓ saved');
-  };
-  $('discard').onclick = () => $('result').replaceChildren();
+  const card = r.card = document.createElement('div');
+  card.className = 'result';
+  card.innerHTML = (!r.score ? '' : e.n < 8 ? 'Too short to score. ' :
+    `<b>${pct('hit')} hit</b> · ${pct('wrong')} wrong · ${pct('silent')} silent · reaction ${e.lat ?? '–'} ms — ` +
+    (ok ? `passed! Next: ${r.bpm + 5} BPM, or the next subdivision. ` : `below ${PASS * 100}%: stay here or slow down. `) +
+    '<button class="save">Save to log</button> ') + '<button class="x" title="Close">✕</button>';
+  if (r.score || r.rec) $('results').prepend(card);
+  card.querySelector('.x').onclick = () => { card.remove(); if (card.url) URL.revokeObjectURL(card.url); };
+  const save = card.querySelector('.save');
+  if (save) save.onclick = () => { log.push(e); localStorage.arpLog = JSON.stringify(log); renderProgress(); save.replaceWith('✓ saved '); };
+  r.rec?.stop();
+  releaseMic();
 }
 
 function show(i) {
@@ -242,28 +258,23 @@ function show(i) {
 }
 
 function frame() {
-  let f = null, midi = null;
-  if (analyser) {
-    analyser.getFloatTimeDomainData(buf);
-    f = detectPitch(buf, ctx.sampleRate, +$('gate').value);
-    if (f) midi = Math.round(freqToMidi(f));
-  }
-  const stable = midi !== null && midi === prevMidi; // 2 frames agreeing filters attack glitches
-  prevMidi = midi;
+  if (!analyser || !(run?.score || tunerOn)) return;
+  analyser.getFloatTimeDomainData(buf);
+  const now = ctx.currentTime, gate = +$('gate').value;
+  const f = detectPitch(buf, ctx.sampleRate, gate), midi = f ? Math.round(freqToMidi(f)) : null;
+  const ev = onsets(rms(buf), midi, now, gate);
   if (tunerOn && f) {
     const m = freqToMidi(f), c = Math.round((m - Math.round(m)) * 100);
     $('tnote').textContent = `${noteName(Math.round(m))} ${c > 0 ? '+' : ''}${c}¢ ${f.toFixed(1)} Hz`;
     $('cents').firstChild.style.left = 50 + c + '%';
   }
-  if (!run?.score || !stable) return;
-  const now = ctx.currentTime;
-  $('heard').textContent = 'heard ' + noteName(midi);
-  // ponytail: a sustained note keeps scoring into the next slot; add onset detection if that inflates hits
-  const j = Math.floor((now - $('lat').value / 1000 - run.t0) / run.d), s = run.slots[j];
+  if (!run?.score || !ev) return;
+  $('heard').textContent = 'heard ' + noteName(ev.midi);
+  const t = ev.t - run.off, s = run.slots[Math.floor((t - run.t0) / run.d)];
   if (!s) return;
   s.heard = true;
-  const ok = run.mode === 'guided' ? midi === s.target : chords[s.ci].tones.includes(midi % 12);
-  if (ok && s.hit === null) s.hit = now - $('lat').value / 1000 - s.t;
+  const ok = run.mode === 'guided' ? ev.midi === s.target : chords[s.ci].tones.includes(ev.midi % 12);
+  if (ok && s.hit === null) s.hit = t - s.t;
 }
 setInterval(frame, 15); // not rAF: rAF pauses when the window is covered, which would stop scoring
 
@@ -276,7 +287,8 @@ function anim() {
   ball.setAttribute('visibility', vis); trail.setAttribute('visibility', vis);
   if (!run) return;
   const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d);
-  if (i >= 0 && i !== run.cur && run.slots[i]) { run.cur = i; show(i); }
+  const k = Math.max(i, 0); // during the count-in, show the first note
+  if (k !== run.cur && run.slots[k]) { run.cur = k; show(k); }
   if (vis === 'hidden') return;
   const b = run.slots[Math.max(i + 1, 0)], a = i >= 0 ? run.slots[i] : b;
   if (!a || !b) return;
@@ -292,15 +304,19 @@ $('go').onclick = () => run ? stop() : start();
 $('tunerBtn').onclick = async () => {
   try { await ensureMic(); } catch (e) { $('status').textContent = 'Mic: ' + e.message; return; }
   tunerOn = !tunerOn; $('tuner').hidden = !tunerOn;
+  releaseMic();
 };
+// Space = start/stop anywhere except while typing in a text/number field.
 document.addEventListener('keydown', e => {
-  if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); $('go').click(); }
+  const t = e.target;
+  if (e.code !== 'Space' || (t.tagName === 'INPUT' && !['checkbox', 'range'].includes(t.type))) return;
+  e.preventDefault(); t.blur?.(); $('go').click();
 });
 
 // --- progress ---
-const log = JSON.parse(localStorage.arpLog ?? '[]');
+const log = load('arpLog', []);
 function renderProgress() {
-  const pass = log.filter(e => e.hit / e.n >= PASS);
+  const pass = log.filter(e => e.mode === 'guided' && e.hit / e.n >= PASS && e.n >= MIN_LOOPS * 4 * e.rate * e.chords.split(' ').length);
   const best = s => Math.max(0, ...pass.filter(e => e.chords === s).map(e => e.bpm * e.rate));
   $('grid').innerHTML = `<table><tr><th></th>${KEYS.map(k => `<th>${k}</th>`).join('')}</tr>` +
     Object.entries(TEMPLATES).map(([t, tp]) => `<tr><th>${t}</th>` + KEYS.map(k => {

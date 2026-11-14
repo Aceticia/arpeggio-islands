@@ -91,11 +91,15 @@ export function makeWalker(g, { repeat, momentum }, rand) {
   };
 }
 
+export function rms(buf) {
+  let s = 0;
+  for (const x of buf) s += x * x;
+  return Math.sqrt(s / buf.length);
+}
+
 // YIN pitch detector. Returns Hz or null (silence / no clear pitch).
 export function detectPitch(buf, sr, gate = 0.01, minHz = 60, maxHz = 1400) {
-  let rms = 0;
-  for (const x of buf) rms += x * x;
-  if (Math.sqrt(rms / buf.length) < gate) return null;
+  if (rms(buf) < gate) return null;
   const maxT = Math.floor(sr / minHz), minT = Math.floor(sr / maxHz), W = buf.length - maxT;
   const d = new Float32Array(maxT + 1);
   let sum = 0;
@@ -114,6 +118,33 @@ export function detectPitch(buf, sr, gate = 0.01, minHz = 60, maxHz = 1400) {
 }
 
 export const freqToMidi = f => 69 + 12 * Math.log2(f / 440);
+
+// Turns per-frame (level, midi) readings into played-note events {midi, t}, so a ringing note
+// counts once. A new event needs a stable pitch (2 frames agree) plus either a pitch change or a
+// level jump vs ~3 frames ago (a re-pick). t is the time of the level jump when there was one.
+// A jump with no pitch following it (metronome bleed, string noise) expires after 100 ms.
+export function makeOnsets() {
+  let prev = null, last = null, onsetAt = null, lastAt = -1;
+  const hist = [0, 0, 0];
+  return (level, midi, now, gate) => {
+    if (level > gate && level > 1.5 * hist[0] && now - lastAt > 0.07) onsetAt ??= now;
+    hist.push(level); hist.shift();
+    if (level < gate) last = null;
+    if (onsetAt !== null && now - onsetAt > 0.1) onsetAt = null;
+    const stable = midi !== null && midi === prev;
+    prev = midi;
+    if (!stable || (onsetAt === null && midi === last)) return null;
+    const t = onsetAt ?? now;
+    onsetAt = null; last = midi; lastAt = now;
+    return { midi, t };
+  };
+}
+
+// Label a midi note with the chord's spelling; octave follows the letter (B#3 = C4, Cb4 = B3).
+export function noteLabel(chord, m) {
+  const name = chord.names[((m % 12) + 12) % 12], acc = (name.match(/#/g)?.length ?? 0) - (name.match(/b/g)?.length ?? 0);
+  return name + (Math.floor((m - acc) / 12) - 1);
+}
 
 // slots: {heard: bool, hit: seconds-after-slot-start | null}
 export function summarize(slots) {
