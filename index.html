@@ -1,0 +1,282 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Arpeggio islands</title>
+<style>
+  :root { color-scheme: light dark; --acc: #e8833a; --dim: #8888; }
+  body { font: 14px system-ui; margin: 16px auto; max-width: 1400px; padding: 0 12px; }
+  fieldset { border: 1px solid var(--dim); border-radius: 6px; margin: 8px 0; line-height: 2.2; }
+  label { margin-right: 14px; white-space: nowrap; }
+  input[type=number] { width: 4.5em; }
+  button { font-size: 14px; }
+  #go { font-size: 18px; padding: 4px 18px; }
+  #now { font-size: 44px; font-weight: 600; min-height: 60px; margin: 8px 0; }
+  #now small, #heard { font-size: 20px; font-weight: 400; opacity: .7; }
+  #status { color: #d33; }
+  .wrap { overflow-x: auto; }
+  svg .e { stroke: var(--dim); fill: none; }
+  svg .b { stroke: #4a90e244; }
+  svg circle { fill: Canvas; stroke: currentColor; }
+  svg .cur circle { fill: var(--acc); }
+  svg .nxt circle { stroke: var(--acc); stroke-width: 3; }
+  svg .on > .chord { fill: var(--acc); font-weight: 700; }
+  svg text { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: currentColor; }
+  svg .chord { font-size: 14px; text-anchor: start; }
+  table { border-collapse: collapse; }
+  td, th { padding: 2px 7px; border: 1px solid var(--dim); text-align: center; }
+  td { cursor: pointer; min-width: 2em; }
+  td.ok { background: #3a36; }
+  #cents { height: 10px; width: 300px; background: var(--dim); position: relative; display: inline-block; }
+  #cents i { position: absolute; left: 50%; width: 3px; height: 100%; background: var(--acc); }
+</style>
+</head>
+<body>
+<h2>Arpeggio islands</h2>
+<fieldset><legend>Tune</legend>
+  <label>Chords (1–8) <input id="chords" size="36" value="G7 Cmaj7"></label>
+  <label>or <select id="tpl"></select> in <select id="key"></select></label>
+  <button id="rndKey">Random key</button><br>
+  <label>Lowest note <input id="low" value="E2" size="4"></label>
+  <label>Octaves <input id="oct" type="number" min="1" max="4" value="2"></label>
+</fieldset>
+<fieldset><legend>Practice</legend>
+  <label>BPM <input id="bpm" type="number" min="30" max="300" value="100"></label>
+  <label>Notes <select id="rate">
+    <option value="0.25">whole</option><option value="0.5">half</option><option value="1" selected>quarter</option>
+    <option value="2">8th</option><option value="3">triplet</option><option value="4">16th</option></select></label>
+  <label>Mode <select id="mode"><option value="guided">Guided path</option><option value="free">Free (any chord tone)</option></select></label><br>
+  <label title="Chance of skipping over notes / wider bridges">Leaps <input id="leap" type="range" min="0" max="0.9" step="0.05" value="0.35"></label>
+  <label title="Chance of restating the same note">Repeats <input id="repeat" type="range" min="0" max="0.6" step="0.05" value="0.1"></label>
+  <label title="Chance of continuing in the same direction">Momentum <input id="momentum" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+  <button id="regen">New graph</button><br>
+  <label><input id="score" type="checkbox" checked> Listen &amp; score</label>
+  <label><input id="rec" type="checkbox"> Record audio</label>
+  <label title="Click-to-mic round trip; raise if correct notes score late/wrong">Latency ms <input id="lat" type="number" value="60"></label>
+  <label title="Mic level below this counts as silence">Mic gate <input id="gate" type="number" step="0.005" min="0" value="0.01"></label>
+</fieldset>
+<button id="go">Start</button> <button id="tunerBtn">Tuner</button>
+<span id="tuner" hidden><span id="tnote">–</span> <span id="cents"><i></i></span></span>
+<span id="heard"></span> <span id="status"></span>
+<div id="now"></div>
+<div class="wrap"><svg id="graph"></svg></div>
+<p id="result"></p>
+<h3>Progress <small id="streak"></small></h3>
+<p><small>Best notes/min (BPM × notes per beat) with ≥85% hits. Click a cell to load it.</small></p>
+<div id="grid"></div>
+<h3>Recent</h3>
+<div id="hist"></div>
+
+<script type="module">
+import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, TEMPLATES, KEYS, transpose } from './core.js';
+
+const $ = id => document.getElementById(id);
+const PASS = 0.85, RATES = { 0.25: 'whole', 0.5: 'half', 1: 'quarter', 2: '8th', 3: 'triplet', 4: '16th' };
+
+// --- settings persistence ---
+const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'rec', 'lat', 'gate'];
+const saved = JSON.parse(localStorage.arpSettings ?? '{}');
+const prop = el => el.type === 'checkbox' ? 'checked' : 'value';
+for (const id of IDS) {
+  const el = $(id);
+  if (id in saved) el[prop(el)] = saved[id];
+  el.addEventListener('change', () => { saved[id] = el[prop(el)]; localStorage.arpSettings = JSON.stringify(saved); });
+}
+const setChords = s => { $('chords').value = s; $('chords').dispatchEvent(new Event('change')); };
+
+$('tpl').innerHTML = '<option value="">template…</option>' + Object.keys(TEMPLATES).map(t => `<option>${t}</option>`).join('');
+$('key').innerHTML = KEYS.map(k => `<option>${k}</option>`).join('');
+const applyTpl = () => $('tpl').value && setChords(transpose(TEMPLATES[$('tpl').value], $('key').value));
+$('tpl').onchange = $('key').onchange = applyTpl;
+$('rndKey').onclick = () => { $('key').value = KEYS[Math.floor(Math.random() * 12)]; applyTpl(); };
+
+// --- graph ---
+let seed = Date.now() % 1e9, G = null, chords = [];
+const label = (ci, m) => chords[ci].names[m % 12] + (Math.floor(m / 12) - 1);
+
+function rebuild() {
+  if (run) stop();
+  try {
+    chords = $('chords').value.trim().split(/\s+/).map(parseChord);
+    if (chords.length > 8) throw Error('Max 8 chords');
+    G = buildGraph(chords, parseNote($('low').value), +$('oct').value, +$('leap').value, rng(seed));
+    $('status').textContent = '';
+    draw();
+  } catch (e) { G = null; $('status').textContent = e.message; $('graph').innerHTML = ''; }
+}
+['chords', 'low', 'oct', 'leap'].forEach(id => $(id).addEventListener('change', rebuild));
+$('regen').onclick = () => { seed++; rebuild(); };
+
+function draw() {
+  const PX = 34, PAD = 60, RH = 80, W = (G.high - G.low) * PX + 2 * PAD;
+  const x = m => PAD + (m - G.low) * PX, y = i => 60 + i * RH;
+  let s = '';
+  G.bridges.forEach((br, i) => {
+    if (i < chords.length - 1) for (const [a, bs] of br) for (const b of bs)
+      s += `<line class="b" x1="${x(a)}" y1="${y(i)}" x2="${x(b)}" y2="${y(i + 1)}"/>`;
+  });
+  G.adj.forEach((adj, i) => {
+    for (const [a, bs] of adj) for (const b of bs) if (b > a) {
+      const h = Math.min(8 + (b - a) * 2.5, RH - 30);
+      s += `<path class="e" d="M${x(a)} ${y(i)} Q${(x(a) + x(b)) / 2} ${y(i) - 2 * h} ${x(b)} ${y(i)}"/>`;
+    }
+  });
+  G.islands.forEach((isl, i) => {
+    s += `<g id="r${i}"><text class="chord" x="4" y="${y(i)}">${chords[i].name}</text>`;
+    for (const m of isl) s += `<g id="n${i}_${m}"><circle cx="${x(m)}" cy="${y(i)}" r="15"/><text x="${x(m)}" y="${y(i)}">${label(i, m)}</text></g>`;
+    s += '</g>';
+  });
+  const svg = $('graph');
+  svg.setAttribute('width', W); svg.setAttribute('height', y(chords.length - 1) + 30);
+  svg.innerHTML = s;
+}
+
+// --- audio ---
+let ctx, mic, analyser, buf, run = null, tunerOn = false, prevMidi = null;
+const audio = async () => { ctx ??= new AudioContext(); await ctx.resume(); };
+async function ensureMic() {
+  await audio();
+  if (mic) return;
+  mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  analyser = ctx.createAnalyser(); analyser.fftSize = 2048; buf = new Float32Array(2048);
+  ctx.createMediaStreamSource(mic).connect(analyser);
+}
+function click(t, accent, out) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.value = accent ? 1500 : 1000;
+  g.gain.setValueAtTime(accent ? 0.5 : 0.25, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+  o.connect(g).connect(out); o.start(t); o.stop(t + 0.05);
+}
+
+async function start() {
+  if (!G) return;
+  try {
+    await audio();
+    if ($('score').checked || $('rec').checked) await ensureMic();
+  } catch (e) { $('status').textContent = 'Mic: ' + e.message; return; }
+  const bpm = +$('bpm').value, rate = +$('rate').value, bar = 240 / bpm, n = Math.round(4 * rate);
+  const out = ctx.createGain(); out.connect(ctx.destination);
+  const t0 = ctx.currentTime + 0.15 + bar; // one bar count-in
+  for (let k = 0; k < 4; k++) click(t0 - bar + k * bar / 4, k === 0, out);
+  run = {
+    bpm, rate, bar, n, d: bar / n, t0, out, nextBar: 0, slots: [], cur: -1, mode: $('mode').value, score: $('score').checked,
+    walk: makeWalker(G, { repeat: +$('repeat').value, momentum: +$('momentum').value }, Math.random),
+    chordsStr: chords.map(c => c.name).join(' '),
+  };
+  if ($('rec').checked) {
+    const rec = new MediaRecorder(mic), chunks = [], stamp = new Date().toISOString().slice(0, 16).replace(':', '');
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = () => {
+      const url = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType }));
+      $('result').insertAdjacentHTML('beforeend', ` <a download="arp-${stamp}.${rec.mimeType.includes('mp4') ? 'm4a' : 'webm'}" href="${url}">Download recording</a>`);
+    };
+    rec.start(); run.rec = rec;
+  }
+  run.timer = setInterval(schedule, 25); schedule();
+  $('go').textContent = 'Stop'; $('result').textContent = '';
+}
+
+// Keep the current and next bar generated so the next notes can be shown ahead of time.
+function schedule() {
+  const r = run;
+  while (r.t0 + r.nextBar * r.bar < ctx.currentTime + r.bar + 0.2) {
+    const b = r.nextBar++, ci = b % chords.length, t = r.t0 + b * r.bar;
+    for (let k = 0; k < 4; k++) click(t + k * r.bar / 4, k === 0, r.out);
+    for (let k = 0; k < r.n; k++)
+      r.slots.push({ t: t + k * r.d, d: r.d, ci, target: r.mode === 'guided' ? r.walk(ci) : null, hit: null, heard: false });
+  }
+}
+
+function stop() {
+  const r = run; run = null;
+  clearInterval(r.timer); r.out.disconnect(); r.rec?.stop();
+  document.querySelectorAll('#graph .cur, #graph .nxt, #graph .on').forEach(e => e.classList.remove('cur', 'nxt', 'on'));
+  $('now').textContent = ''; $('heard').textContent = ''; $('go').textContent = 'Start';
+  if (!r.score) return;
+  const judged = ctx.currentTime - $('lat').value / 1000, done = r.slots.filter(s => s.t + s.d <= judged);
+  if (done.length < 8) { $('result').textContent = 'Too short to score.'; return; }
+  const e = { d: new Date().toISOString(), chords: r.chordsStr, bpm: r.bpm, rate: r.rate, mode: r.mode, ...summarize(done) };
+  log.push(e); localStorage.arpLog = JSON.stringify(log);
+  const pct = k => Math.round(100 * e[k] / e.n) + '%', ok = e.hit / e.n >= PASS;
+  $('result').innerHTML = `<b>${pct('hit')} hit</b> · ${pct('wrong')} wrong · ${pct('silent')} silent · reaction ${e.lat ?? '–'} ms — ` +
+    (ok ? `passed! Next: ${r.bpm + 5} BPM, or the next subdivision.` : `below ${PASS * 100}%: stay here or slow down.`);
+  renderProgress();
+}
+
+function show(i) {
+  const s = run.slots[i], c = chords[s.ci];
+  document.querySelectorAll('#graph .cur, #graph .nxt, #graph .on').forEach(e => e.classList.remove('cur', 'nxt', 'on'));
+  $('r' + s.ci)?.classList.add('on');
+  if (run.mode === 'free') { $('now').innerHTML = `${c.name} <small>${c.tones.map(t => c.names[t]).join(' ')}</small>`; return; }
+  $(`n${s.ci}_${s.target}`)?.classList.add('cur');
+  const ahead = run.slots.slice(i + 1, i + 9);
+  ahead.slice(0, 3).forEach(a => $(`n${a.ci}_${a.target}`)?.classList.add('nxt'));
+  $('now').innerHTML = `${label(s.ci, s.target)} <small>${c.name} &nbsp;→ ` +
+    ahead.map((a, k) => ((k ? ahead[k - 1].ci : s.ci) !== a.ci ? `| ${chords[a.ci].name}: ` : '') + label(a.ci, a.target)).join(' ') + '</small>';
+}
+
+function frame() {
+  let f = null, midi = null;
+  if (analyser) {
+    analyser.getFloatTimeDomainData(buf);
+    f = detectPitch(buf, ctx.sampleRate, +$('gate').value);
+    if (f) midi = Math.round(freqToMidi(f));
+  }
+  const stable = midi !== null && midi === prevMidi; // 2 frames agreeing filters attack glitches
+  prevMidi = midi;
+  if (tunerOn && f) {
+    const m = freqToMidi(f), c = Math.round((m - Math.round(m)) * 100);
+    $('tnote').textContent = `${noteName(Math.round(m))} ${c > 0 ? '+' : ''}${c}¢ ${f.toFixed(1)} Hz`;
+    $('cents').firstChild.style.left = 50 + c + '%';
+  }
+  if (!run) return;
+  const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d);
+  if (i >= 0 && i !== run.cur && run.slots[i]) { run.cur = i; show(i); }
+  if (!run.score || !stable) return;
+  $('heard').textContent = 'heard ' + noteName(midi);
+  // ponytail: a sustained note keeps scoring into the next slot; add onset detection if that inflates hits
+  const j = Math.floor((now - $('lat').value / 1000 - run.t0) / run.d), s = run.slots[j];
+  if (!s) return;
+  s.heard = true;
+  const ok = run.mode === 'guided' ? midi === s.target : chords[s.ci].tones.includes(midi % 12);
+  if (ok && s.hit === null) s.hit = now - $('lat').value / 1000 - s.t;
+}
+setInterval(frame, 15); // not rAF: rAF pauses when the window is covered, which would stop scoring
+
+$('go').onclick = () => run ? stop() : start();
+$('tunerBtn').onclick = async () => {
+  try { await ensureMic(); } catch (e) { $('status').textContent = 'Mic: ' + e.message; return; }
+  tunerOn = !tunerOn; $('tuner').hidden = !tunerOn;
+};
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); $('go').click(); }
+});
+
+// --- progress ---
+const log = JSON.parse(localStorage.arpLog ?? '[]');
+function renderProgress() {
+  const pass = log.filter(e => e.hit / e.n >= PASS);
+  const best = s => Math.max(0, ...pass.filter(e => e.chords === s).map(e => e.bpm * e.rate));
+  $('grid').innerHTML = `<table><tr><th></th>${KEYS.map(k => `<th>${k}</th>`).join('')}</tr>` +
+    Object.entries(TEMPLATES).map(([t, tp]) => `<tr><th>${t}</th>` + KEYS.map(k => {
+      const s = transpose(tp, k), b = best(s);
+      return `<td class="${b ? 'ok' : ''}" data-c="${s}" title="${s}">${b || ''}</td>`;
+    }).join('') + '</tr>').join('') + '</table>';
+  const days = new Set(log.map(e => new Date(e.d).toDateString())), d = new Date();
+  if (!days.has(d.toDateString())) d.setDate(d.getDate() - 1);
+  let streak = 0;
+  while (days.has(d.toDateString())) { streak++; d.setDate(d.getDate() - 1); }
+  const mins = Math.round(log.reduce((a, e) => a + e.n / (e.bpm * e.rate), 0));
+  $('streak').textContent = `🔥 ${streak}-day streak · ${mins} min total · ${log.length} sessions`;
+  $('hist').innerHTML = '<table><tr><th>When</th><th>Chords</th><th>BPM</th><th>Notes</th><th>Mode</th><th>Hit</th><th>Wrong</th><th>Silent</th><th>Reaction</th></tr>' +
+    log.slice(-15).reverse().map(e => `<tr><td>${new Date(e.d).toLocaleString()}</td><td>${e.chords}</td><td>${e.bpm}</td><td>${RATES[e.rate]}</td><td>${e.mode}</td>` +
+      ['hit', 'wrong', 'silent'].map(k => `<td>${Math.round(100 * e[k] / e.n)}%</td>`).join('') + `<td>${e.lat ?? '–'} ms</td></tr>`).join('') + '</table>';
+}
+$('grid').onclick = e => e.target.dataset.c && setChords(e.target.dataset.c);
+
+rebuild();
+renderProgress();
+</script>
+</body>
+</html>
