@@ -15,14 +15,18 @@
   #now small, #heard { font-size: 20px; font-weight: 400; opacity: .7; }
   #status { color: #d33; }
   .wrap { overflow-x: auto; }
-  svg .e { stroke: var(--dim); fill: none; }
-  svg .b { stroke: #4a90e244; }
+  svg .e { stroke: currentColor; stroke-opacity: .6; stroke-width: 1.6; fill: none; }
+  svg .b { stroke: #4a90e2; stroke-opacity: .3; }
+  svg .island { fill: #8882; }
+  svg .on > .island { fill: #e8833a22; stroke: var(--acc); }
   svg circle { fill: Canvas; stroke: currentColor; }
   svg .cur circle { fill: var(--acc); }
   svg .nxt circle { stroke: var(--acc); stroke-width: 3; }
   svg .on > .chord { fill: var(--acc); font-weight: 700; }
   svg text { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: currentColor; }
-  svg .chord { font-size: 14px; text-anchor: start; }
+  svg .chord { font-size: 16px; }
+  svg #ball { fill: var(--acc); stroke: none; }
+  svg #trail { stroke: var(--acc); stroke-width: 3; stroke-opacity: .7; }
   table { border-collapse: collapse; }
   td, th { padding: 2px 7px; border: 1px solid var(--dim); text-align: center; }
   td { cursor: pointer; min-width: 2em; }
@@ -107,27 +111,40 @@ function rebuild() {
 ['chords', 'low', 'oct', 'leap'].forEach(id => $(id).addEventListener('change', rebuild));
 $('regen').onclick = () => { seed++; rebuild(); };
 
+// Each chord is an island (column) in progression order; within it, higher notes sit higher,
+// zig-zagged with a little seeded jitter so links between notes don't overlap.
+let P = {}; // 'ci_midi' -> [x, y]
 function draw() {
-  const PX = 34, PAD = 60, RH = 80, W = (G.high - G.low) * PX + 2 * PAD;
-  const x = m => PAD + (m - G.low) * PX, y = i => 60 + i * RH;
+  const CW = 150, GAP = 120, NH = 36, TOP = 70, H = (Math.max(...G.islands.map(a => a.length)) - 1) * NH;
+  const cx = i => 40 + i * (CW + GAP) + CW / 2, jit = rng(seed + 1);
+  P = {};
+  G.islands.forEach((isl, i) => isl.forEach((m, r) => {
+    P[i + '_' + m] = [cx(i) + (r % 2 ? 36 : -36) + (jit() - 0.5) * 36, TOP + H - (isl.length > 1 ? (r / (isl.length - 1)) * H : H / 2)];
+  }));
   let s = '';
+  G.islands.forEach((_, i) => s += `<g id="r${i}"><rect class="island" x="${cx(i) - CW / 2}" y="${TOP - 32}" width="${CW}" height="${H + 64}" rx="40"/>` +
+    `<text class="chord" x="${cx(i)}" y="${TOP - 50}">${chords[i].name}</text></g>`);
   G.bridges.forEach((br, i) => {
-    if (i < chords.length - 1) for (const [a, bs] of br) for (const b of bs)
-      s += `<line class="b" x1="${x(a)}" y1="${y(i)}" x2="${x(b)}" y2="${y(i + 1)}"/>`;
+    if (i < chords.length - 1) for (const [a, bs] of br) for (const b of bs) {
+      const [x1, y1] = P[i + '_' + a], [x2, y2] = P[i + 1 + '_' + b];
+      s += `<line class="b" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    }
   });
   G.adj.forEach((adj, i) => {
     for (const [a, bs] of adj) for (const b of bs) if (b > a) {
-      const h = Math.min(8 + (b - a) * 2.5, RH - 30);
-      s += `<path class="e" d="M${x(a)} ${y(i)} Q${(x(a) + x(b)) / 2} ${y(i) - 2 * h} ${x(b)} ${y(i)}"/>`;
+      const [x1, y1] = P[i + '_' + a], [x2, y2] = P[i + '_' + b], span = G.islands[i].indexOf(b) - G.islands[i].indexOf(a);
+      const bow = span > 1 ? (Math.sign((x1 + x2) / 2 - cx(i)) || 1) * (10 + 10 * span) : 0; // skips bow outward
+      s += `<path class="e" d="M${x1} ${y1} Q${(x1 + x2) / 2 + bow} ${(y1 + y2) / 2} ${x2} ${y2}"/>`;
     }
   });
-  G.islands.forEach((isl, i) => {
-    s += `<g id="r${i}"><text class="chord" x="4" y="${y(i)}">${chords[i].name}</text>`;
-    for (const m of isl) s += `<g id="n${i}_${m}"><circle cx="${x(m)}" cy="${y(i)}" r="15"/><text x="${x(m)}" y="${y(i)}">${label(i, m)}</text></g>`;
-    s += '</g>';
-  });
+  s += '<line id="trail" visibility="hidden"/>';
+  for (const k in P) {
+    const [ci, m] = k.split('_').map(Number), [x, y] = P[k];
+    s += `<g id="n${k}"><circle cx="${x}" cy="${y}" r="15"/><text x="${x}" y="${y}">${label(ci, m)}</text></g>`;
+  }
+  s += '<circle id="ball" r="7" visibility="hidden"/>';
   const svg = $('graph');
-  svg.setAttribute('width', W); svg.setAttribute('height', y(chords.length - 1) + 30);
+  svg.setAttribute('width', cx(chords.length - 1) + CW / 2 + 40); svg.setAttribute('height', TOP + H + 50);
   svg.innerHTML = s;
 }
 
@@ -230,10 +247,8 @@ function frame() {
     $('tnote').textContent = `${noteName(Math.round(m))} ${c > 0 ? '+' : ''}${c}¢ ${f.toFixed(1)} Hz`;
     $('cents').firstChild.style.left = 50 + c + '%';
   }
-  if (!run) return;
-  const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d);
-  if (i >= 0 && i !== run.cur && run.slots[i]) { run.cur = i; show(i); }
-  if (!run.score || !stable) return;
+  if (!run?.score || !stable) return;
+  const now = ctx.currentTime;
   $('heard').textContent = 'heard ' + noteName(midi);
   // ponytail: a sustained note keeps scoring into the next slot; add onset detection if that inflates hits
   const j = Math.floor((now - $('lat').value / 1000 - run.t0) / run.d), s = run.slots[j];
@@ -243,6 +258,27 @@ function frame() {
   if (ok && s.hit === null) s.hit = now - $('lat').value / 1000 - s.t;
 }
 setInterval(frame, 15); // not rAF: rAF pauses when the window is covered, which would stop scoring
+
+// Visuals: the ball leaves the current note and lands on the next one exactly on its beat.
+function anim() {
+  requestAnimationFrame(anim);
+  const ball = $('ball'), trail = $('trail');
+  if (!ball) return;
+  const vis = run?.mode === 'guided' && run.slots.length ? 'visible' : 'hidden';
+  ball.setAttribute('visibility', vis); trail.setAttribute('visibility', vis);
+  if (!run) return;
+  const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d);
+  if (i >= 0 && i !== run.cur && run.slots[i]) { run.cur = i; show(i); }
+  if (vis === 'hidden') return;
+  const b = run.slots[Math.max(i + 1, 0)], a = i >= 0 ? run.slots[i] : b;
+  if (!a || !b) return;
+  const [ax, ay] = P[a.ci + '_' + a.target], [bx, by] = P[b.ci + '_' + b.target];
+  const p = Math.min(1, Math.max(0, (now - a.t) / a.d)), h = 18 + Math.hypot(bx - ax, by - ay) * 0.15;
+  ball.setAttribute('cx', ax + (bx - ax) * p);
+  ball.setAttribute('cy', ay + (by - ay) * p - Math.sin(Math.PI * p) * h);
+  trail.setAttribute('x1', ax); trail.setAttribute('y1', ay); trail.setAttribute('x2', bx); trail.setAttribute('y2', by);
+}
+requestAnimationFrame(anim);
 
 $('go').onclick = () => run ? stop() : start();
 $('tunerBtn').onclick = async () => {
