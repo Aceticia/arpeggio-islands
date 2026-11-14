@@ -18,8 +18,17 @@
   #now small, #heard { font-size: 20px; font-weight: 400; opacity: .7; }
   #status { color: #d33; }
   .wrap { overflow-x: auto; }
+  #graph { display: block; margin: 0 auto; }
+  .running fieldset, .running #below, .running #results, .running .hint { display: none; } /* focus mode while playing */
+  .hint { opacity: .6; font-size: 12px; }
+  output { display: inline-block; width: 2.4em; opacity: .7; }
+  #beats i { display: inline-block; width: 12px; height: 12px; margin: 0 3px; border-radius: 50%; background: #8884; vertical-align: middle; }
+  #beats i.on { background: var(--acc); transform: scale(1.3); }
+  #beats.countin i.on { background: currentColor; }
+  #heard.ok { color: #3b3; opacity: 1; }
+  #heard.bad { color: #e44; opacity: 1; }
   svg .e { stroke: currentColor; stroke-opacity: .6; stroke-width: 1.6; fill: none; }
-  svg .b { stroke: #4a90e2; stroke-opacity: .3; }
+  svg .b { stroke: #4a90e2; stroke-opacity: .15; }
   svg .island { fill: #8882; }
   svg .on > .island { fill: #e8833a22; stroke: var(--acc); }
   svg circle { fill: Canvas; stroke: currentColor; }
@@ -28,7 +37,7 @@
   svg .on > .chord { fill: var(--acc); font-weight: 700; }
   svg text { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: currentColor; }
   svg .chord { font-size: 16px; }
-  svg #ball { fill: var(--acc); stroke: none; }
+  svg #ball { fill: var(--acc); stroke: Canvas; stroke-width: 2; }
   svg #trail { stroke: var(--acc); stroke-width: 3; stroke-opacity: .7; }
   table { border-collapse: collapse; }
   td, th { padding: 2px 7px; border: 1px solid var(--dim); text-align: center; }
@@ -53,26 +62,29 @@
     <option value="0.25">whole</option><option value="0.5">half</option><option value="1" selected>quarter</option>
     <option value="2">8th</option><option value="3">triplet</option><option value="4">16th</option></select></label>
   <label>Mode <select id="mode"><option value="guided">Guided path</option><option value="free">Free (any chord tone)</option></select></label><br>
-  <label title="Chance of skipping over notes / wider bridges">Leaps <input id="leap" type="range" min="0" max="0.9" step="0.05" value="0.35"></label>
-  <label title="Chance of restating the same note">Repeats <input id="repeat" type="range" min="0" max="0.6" step="0.05" value="0.1"></label>
-  <label title="Chance of continuing in the same direction">Momentum <input id="momentum" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+  <label title="Chance of skipping over notes / wider bridges">Leaps <input id="leap" type="range" min="0" max="0.9" step="0.05" value="0.35"><output></output></label>
+  <label title="Chance of restating the same note">Repeats <input id="repeat" type="range" min="0" max="0.6" step="0.05" value="0.1"><output></output></label>
+  <label title="Chance of continuing in the same direction">Momentum <input id="momentum" type="range" min="0" max="1" step="0.05" value="0.5"><output></output></label>
   <button id="regen">New graph</button><br>
   <label><input id="score" type="checkbox" checked> Listen &amp; score</label>
   <label><input id="rec" type="checkbox"> Record audio</label>
   <label title="Added on top of the browser's reported output latency. Raise if notes played on time score late or wrong (Bluetooth: ~200)">Latency +ms <input id="latency" type="number" value="30"></label>
   <label title="Mic level below this counts as silence">Mic gate <input id="gate" type="number" step="0.005" min="0" value="0.01"></label>
 </fieldset>
-<button id="go">Start</button> <button id="tunerBtn">Tuner</button>
+<button id="go">Start</button> <span id="beats"><i></i><i></i><i></i><i></i></span> <button id="tunerBtn">Tuner</button>
+<span class="hint">Space = start / stop</span>
 <span id="tuner" hidden><span id="tnote">–</span> <span id="cents"><i></i></span></span>
 <span id="heard"></span> <span id="status"></span>
+<div id="results"></div>
 <div id="now"></div>
 <div class="wrap"><svg id="graph"></svg></div>
-<div id="results"></div>
+<div id="below">
 <h3>Progress <small id="streak"></small></h3>
 <p><small>Best notes/min (BPM × notes per beat) in guided sessions of ≥4 loops with ≥85% hits. Click a cell to load it.</small></p>
 <div id="grid"></div>
 <h3>Recent</h3>
 <div id="hist"></div>
+</div>
 
 <script type="module">
 import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, TEMPLATES, KEYS, transpose, rms, makeOnsets, noteLabel } from './core.js';
@@ -89,6 +101,10 @@ for (const id of IDS) {
   const el = $(id);
   if (id in saved) el[prop(el)] = saved[id];
   el.addEventListener('change', () => { saved[id] = el[prop(el)]; localStorage.arpSettings = JSON.stringify(saved); });
+}
+for (const id of ['leap', 'repeat', 'momentum']) {
+  const el = $(id), show = () => el.nextElementSibling.textContent = el.value;
+  el.addEventListener('input', show); show();
 }
 const setChords = s => { $('chords').value = s; $('chords').dispatchEvent(new Event('change')); };
 
@@ -147,7 +163,7 @@ function draw() {
     const [ci, m] = k.split('_').map(Number), [x, y] = P[k];
     s += `<g id="n${k}"><circle cx="${x}" cy="${y}" r="15"/><text x="${x}" y="${y}">${label(ci, m)}</text></g>`;
   }
-  s += '<circle id="ball" r="7" visibility="hidden"/>';
+  s += '<circle id="ball" r="9" visibility="hidden"/>';
   const svg = $('graph');
   svg.setAttribute('width', cx(chords.length - 1) + CW / 2 + 40); svg.setAttribute('height', TOP + H + 50);
   svg.innerHTML = s;
@@ -208,7 +224,7 @@ async function start() {
     rec.start(); r.rec = rec;
   }
   run.timer = setInterval(schedule, 25); schedule();
-  $('go').textContent = 'Stop';
+  $('go').textContent = 'Stop'; document.body.classList.add('running');
 }
 
 // Keep the current and next bar generated so the next notes can be shown ahead of time.
@@ -227,7 +243,8 @@ function stop() {
   const r = run; run = null;
   clearInterval(r.timer); r.out.disconnect();
   document.querySelectorAll('#graph .cur, #graph .nxt, #graph .on').forEach(e => e.classList.remove('cur', 'nxt', 'on'));
-  $('now').textContent = ''; $('heard').textContent = ''; $('go').textContent = 'Start';
+  $('now').textContent = ''; $('heard').textContent = ''; $('go').textContent = 'Start'; document.body.classList.remove('running');
+  document.querySelectorAll('#beats i').forEach(b => b.classList.remove('on'));
   const done = r.slots.filter(s => s.t + s.d <= ctx.currentTime - r.off);
   const e = { d: new Date().toISOString(), chords: r.chordsStr, bpm: r.bpm, rate: r.rate, mode: r.mode, ...summarize(done) };
   const pct = k => Math.round(100 * e[k] / e.n) + '%', ok = e.hit / e.n >= PASS;
@@ -269,11 +286,11 @@ function frame() {
     $('cents').firstChild.style.left = 50 + c + '%';
   }
   if (!run?.score || !ev) return;
-  $('heard').textContent = 'heard ' + noteName(ev.midi);
   const t = ev.t - run.off, s = run.slots[Math.floor((t - run.t0) / run.d)];
   if (!s) return;
   s.heard = true;
   const ok = run.mode === 'guided' ? ev.midi === s.target : chords[s.ci].tones.includes(ev.midi % 12);
+  $('heard').textContent = noteName(ev.midi) + (ok ? ' ✓' : ' ✗'); $('heard').className = ok ? 'ok' : 'bad';
   if (ok && s.hit === null) s.hit = t - s.t;
 }
 setInterval(frame, 15); // not rAF: rAF pauses when the window is covered, which would stop scoring
@@ -286,7 +303,9 @@ function anim() {
   const vis = run?.mode === 'guided' && run.slots.length ? 'visible' : 'hidden';
   ball.setAttribute('visibility', vis); trail.setAttribute('visibility', vis);
   if (!run) return;
-  const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d);
+  const now = ctx.currentTime, i = Math.floor((now - run.t0) / run.d), beat = Math.floor((now - run.t0) / (run.bar / 4));
+  $('beats').className = beat < 0 ? 'countin' : '';
+  document.querySelectorAll('#beats i').forEach((b, n) => b.classList.toggle('on', n === ((beat % 4) + 4) % 4));
   const k = Math.max(i, 0); // during the count-in, show the first note
   if (k !== run.cur && run.slots[k]) { run.cur = k; show(k); }
   if (vis === 'hidden') return;
