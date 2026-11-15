@@ -32,7 +32,9 @@
   svg .island { fill: #8882; }
   svg .on > .island { fill: #e8833a22; stroke: var(--acc); }
   svg circle { fill: Canvas; stroke: currentColor; }
-  svg .cur circle { fill: var(--acc); }
+  svg .cur circle { stroke: var(--acc); stroke-width: 5; r: 19px; }
+  svg .nd text { fill: #111; font-weight: 600; }
+  .nt { color: #111; border-radius: 9px; padding: 0 6px; margin: 0 1px; font-weight: 600; }
   svg .nxt circle { stroke: var(--acc); stroke-width: 3; }
   svg .on > .chord { fill: var(--acc); font-weight: 700; }
   svg text { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: currentColor; }
@@ -79,6 +81,7 @@
 <span id="heard"></span> <span id="status"></span>
 <div id="results"></div>
 <div id="now"></div>
+<div id="legend"></div>
 <div class="wrap"><svg id="graph"></svg></div>
 <div id="below">
 <h3>Progress <small id="streak"></small></h3>
@@ -118,7 +121,10 @@ $('rndKey').onclick = () => { $('key').value = KEYS[Math.floor(Math.random() * 1
 
 // --- graph ---
 let seed = Date.now() % 1e9, G = null, chords = [];
-const label = (ci, m) => noteLabel(chords[ci], m);
+// Octave shown by colour, not number. Written octave, so B#3 is coloured as octave 3 like its old label.
+const OCT = ['#ff6b6b', '#ffd43b', '#69db7c', '#74a4ff', '#c18cff', '#ff8cc6', '#4dd4e8']; // octave 2, 3, 4, …
+const label = (ci, m) => { const [, name, o] = noteLabel(chords[ci], m).match(/^(.*?)(-?\d+)$/); return { name, o: +o, col: OCT[(((o - 2) % 7) + 7) % 7] }; };
+const chip = (ci, m) => { const l = label(ci, m); return `<span class="nt" style="background:${l.col}">${l.name}</span>`; };
 
 function rebuild() {
   if (run) stop();
@@ -128,7 +134,7 @@ function rebuild() {
     G = buildGraph(chords, parseNote($('low').value), +$('oct').value, +$('links').value, rng(seed));
     $('status').textContent = '';
     draw();
-  } catch (e) { G = null; $('status').textContent = e.message; $('graph').innerHTML = ''; }
+  } catch (e) { G = null; $('status').textContent = e.message; $('graph').innerHTML = $('legend').innerHTML = ''; }
 }
 ['chords', 'low', 'oct', 'links'].forEach(id => $(id).addEventListener('change', rebuild));
 $('regen').onclick = () => { seed++; rebuild(); };
@@ -155,15 +161,18 @@ function draw() {
       s += `<line class="e" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
     }
   });
+  const octs = new Map();
   s += '<line id="trail" visibility="hidden"/>';
   for (const k in P) {
     const [ci, m] = k.split('_').map(Number), [x, y] = P[k];
-    s += `<g id="n${k}"><circle cx="${x}" cy="${y}" r="15"/><text x="${x}" y="${y}">${label(ci, m)}</text></g>`;
+    const l = label(ci, m); octs.set(l.o, l.col);
+    s += `<g id="n${k}" class="nd"><circle cx="${x}" cy="${y}" r="15" style="fill:${l.col}"/><text x="${x}" y="${y}">${l.name}</text></g>`;
   }
   s += '<circle id="ball" r="9" visibility="hidden"/>';
   const svg = $('graph');
   svg.setAttribute('width', x0(chords.length - 1) + BOX.w + PAD + 40); svg.setAttribute('height', TOP + G.h + PAD + 20);
   svg.innerHTML = s;
+  $('legend').innerHTML = 'Octave ' + [...octs].sort((a, b) => a[0] - b[0]).map(([o, c]) => `<span class="nt" style="background:${c}">${o}</span>`).join('');
 }
 
 // --- audio ---
@@ -283,8 +292,8 @@ function show(i) {
   $(`n${s.ci}_${s.target}`)?.classList.add('cur');
   const ahead = run.slots.slice(i + 1, i + 9);
   ahead.slice(0, 3).forEach(a => $(`n${a.ci}_${a.target}`)?.classList.add('nxt'));
-  $('now').innerHTML = `${label(s.ci, s.target)} <small>${c.name} &nbsp;→ ` +
-    ahead.map((a, k) => ((k ? ahead[k - 1].ci : s.ci) !== a.ci ? `| ${chords[a.ci].name}: ` : '') + label(a.ci, a.target)).join(' ') + '</small>';
+  $('now').innerHTML = `${chip(s.ci, s.target)} <small>${c.name} &nbsp;→ ` +
+    ahead.map((a, k) => ((k ? ahead[k - 1].ci : s.ci) !== a.ci ? `| ${chords[a.ci].name}: ` : '') + chip(a.ci, a.target)).join(' ') + '</small>';
 }
 
 function frame() {
