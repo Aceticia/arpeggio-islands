@@ -62,7 +62,7 @@
     <option value="0.25">whole</option><option value="0.5">half</option><option value="1" selected>quarter</option>
     <option value="2">8th</option><option value="3">triplet</option><option value="4">16th</option></select></label>
   <label>Mode <select id="mode"><option value="guided">Guided path</option><option value="free">Free (any chord tone)</option></select></label><br>
-  <label title="Chance of skipping over notes / wider bridges">Leaps <input id="leap" type="range" min="0" max="0.9" step="0.05" value="0.35"><output></output></label>
+  <label title="How many nearest notes each note links to (more links = more choices)">Links <input id="links" type="range" min="1" max="5" step="1" value="3"><output></output></label>
   <label title="Chance of restating the same note">Repeats <input id="repeat" type="range" min="0" max="0.6" step="0.05" value="0.1"><output></output></label>
   <label title="Chance of continuing in the same direction">Momentum <input id="momentum" type="range" min="0" max="1" step="0.05" value="0.5"><output></output></label>
   <button id="regen">New graph</button><br>
@@ -89,14 +89,14 @@
 </div>
 
 <script type="module">
-import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, TEMPLATES, KEYS, transpose, rms, makeOnsets, noteLabel } from './core.js';
+import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, noteName, summarize, rng, BOX, TEMPLATES, KEYS, transpose, rms, makeOnsets, noteLabel } from './core.js';
 
 const $ = id => document.getElementById(id);
 const load = (k, d) => { try { return JSON.parse(localStorage[k]) ?? d; } catch { return d; } };
 const PASS = 0.85, MIN_LOOPS = 4, RATES = { 0.25: 'whole', 0.5: 'half', 1: 'quarter', 2: '8th', 3: 'triplet', 4: '16th' };
 
 // --- settings persistence ---
-const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'leap', 'repeat', 'momentum', 'score', 'play', 'rec', 'latency', 'gate'];
+const IDS = ['chords', 'low', 'oct', 'bpm', 'rate', 'mode', 'links', 'repeat', 'momentum', 'score', 'play', 'rec', 'latency', 'gate'];
 const saved = load('arpSettings', {});
 const prop = el => el.type === 'checkbox' ? 'checked' : 'value';
 for (const id of IDS) {
@@ -104,7 +104,7 @@ for (const id of IDS) {
   if (id in saved) el[prop(el)] = saved[id];
   el.addEventListener('change', () => { saved[id] = el[prop(el)]; localStorage.arpSettings = JSON.stringify(saved); });
 }
-for (const id of ['leap', 'repeat', 'momentum']) {
+for (const id of ['links', 'repeat', 'momentum']) {
   const el = $(id), show = () => el.nextElementSibling.textContent = el.value;
   el.addEventListener('input', show); show();
 }
@@ -125,28 +125,24 @@ function rebuild() {
   try {
     chords = $('chords').value.trim().split(/\s+/).map(parseChord);
     if (chords.length > 8) throw Error('Max 8 chords');
-    G = buildGraph(chords, parseNote($('low').value), +$('oct').value, +$('leap').value, rng(seed));
+    G = buildGraph(chords, parseNote($('low').value), +$('oct').value, +$('links').value, rng(seed));
     $('status').textContent = '';
     draw();
   } catch (e) { G = null; $('status').textContent = e.message; $('graph').innerHTML = ''; }
 }
-['chords', 'low', 'oct', 'leap'].forEach(id => $(id).addEventListener('change', rebuild));
+['chords', 'low', 'oct', 'links'].forEach(id => $(id).addEventListener('change', rebuild));
 $('regen').onclick = () => { seed++; rebuild(); };
 ['bpm', 'rate', 'mode', 'repeat', 'momentum', 'score', 'play', 'rec', 'latency'].forEach(id => $(id).addEventListener('change', () => run && stop()));
 
-// Each chord is an island (column) in progression order; within it, higher notes sit higher,
-// zig-zagged with a little seeded jitter so links between notes don't overlap.
+// Each chord is an island in progression order; its notes sit where buildGraph scattered them.
 let P = {}; // 'ci_midi' -> [x, y]
 function draw() {
-  const CW = 150, GAP = 120, NH = 36, TOP = 70, H = (Math.max(...G.islands.map(a => a.length)) - 1) * NH;
-  const cx = i => 40 + i * (CW + GAP) + CW / 2, jit = rng(seed + 1);
+  const PAD = 28, TOP = 80, x0 = i => 40 + PAD + i * (BOX.w + BOX.gap);
   P = {};
-  G.islands.forEach((isl, i) => isl.forEach((m, r) => {
-    P[i + '_' + m] = [cx(i) + (r % 2 ? 36 : -36) + (jit() - 0.5) * 36, TOP + H - (isl.length > 1 ? (r / (isl.length - 1)) * H : H / 2)];
-  }));
+  G.islands.forEach((isl, i) => isl.forEach((m, k) => { P[i + '_' + m] = [x0(i) + G.pos[i][k][0], TOP + G.pos[i][k][1]]; }));
   let s = '';
-  G.islands.forEach((_, i) => s += `<g id="r${i}"><rect class="island" x="${cx(i) - CW / 2}" y="${TOP - 32}" width="${CW}" height="${H + 64}" rx="40"/>` +
-    `<text class="chord" x="${cx(i)}" y="${TOP - 50}">${chords[i].name}</text></g>`);
+  G.islands.forEach((_, i) => s += `<g id="r${i}"><rect class="island" x="${x0(i) - PAD}" y="${TOP - PAD}" width="${BOX.w + 2 * PAD}" height="${G.h + 2 * PAD}" rx="30"/>` +
+    `<text class="chord" x="${x0(i) + BOX.w / 2}" y="${TOP - PAD - 18}">${chords[i].name}</text></g>`);
   G.bridges.forEach((br, i) => {
     if (i < chords.length - 1) for (const [a, bs] of br) for (const b of bs) {
       const [x1, y1] = P[i + '_' + a], [x2, y2] = P[i + 1 + '_' + b];
@@ -155,9 +151,8 @@ function draw() {
   });
   G.adj.forEach((adj, i) => {
     for (const [a, bs] of adj) for (const b of bs) if (b > a) {
-      const [x1, y1] = P[i + '_' + a], [x2, y2] = P[i + '_' + b], span = G.islands[i].indexOf(b) - G.islands[i].indexOf(a);
-      const bow = span > 1 ? (Math.sign((x1 + x2) / 2 - cx(i)) || 1) * (10 + 10 * span) : 0; // skips bow outward
-      s += `<path class="e" d="M${x1} ${y1} Q${(x1 + x2) / 2 + bow} ${(y1 + y2) / 2} ${x2} ${y2}"/>`;
+      const [x1, y1] = P[i + '_' + a], [x2, y2] = P[i + '_' + b];
+      s += `<line class="e" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
     }
   });
   s += '<line id="trail" visibility="hidden"/>';
@@ -167,7 +162,7 @@ function draw() {
   }
   s += '<circle id="ball" r="9" visibility="hidden"/>';
   const svg = $('graph');
-  svg.setAttribute('width', cx(chords.length - 1) + CW / 2 + 40); svg.setAttribute('height', TOP + H + 50);
+  svg.setAttribute('width', x0(chords.length - 1) + BOX.w + PAD + 40); svg.setAttribute('height', TOP + G.h + PAD + 20);
   svg.innerHTML = s;
 }
 
