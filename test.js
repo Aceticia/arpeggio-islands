@@ -1,6 +1,6 @@
 // node test.js
 import assert from 'node:assert/strict';
-import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, summarize, rng, transpose, TEMPLATES, makeOnsets, noteLabel } from './core.js';
+import { parseChord, parseNote, buildGraph, makeWalker, detectPitch, freqToMidi, summarize, rng, transpose, TEMPLATES, makeOnsets, noteLabel, crosses } from './core.js';
 
 const sp = s => { const c = parseChord(s); return c.tones.map(t => c.names[t]).join(' '); };
 assert.equal(sp('Bbmaj7'), 'Bb D F A');
@@ -20,9 +20,19 @@ assert.equal(parseNote('E2'), 40);
 assert.equal(transpose(TEMPLATES['ii–V–I'], 'Bb'), 'Cm7 F7 Bbmaj7');
 
 const chords = ['G7', 'Cmaj7', 'Am7'].map(parseChord), r = rng(1);
-const g = buildGraph(chords, 40, 2, 0.35, r);
+const g = buildGraph(chords, 40, 2, 3, r);
 assert.deepEqual(g.islands[0], [41, 43, 47, 50, 53, 55, 59, 62]); // G7 tones E2..E4
-g.islands.forEach((isl, i) => isl.slice(1).forEach((m, k) => assert(g.adj[i].get(isl[k]).includes(m)))); // stepwise always linked
+for (const [ch, oct, k] of [[['A13', 'Dm11', 'G7'], 4, 3], [['C', 'F#7'], 1, 1], [['Bb6/9'], 3, 5]])
+  for (let sd = 0; sd < 200; sd++) { // every island: links never cross, and every note is reachable
+    const h = buildGraph(ch.map(parseChord), 40, oct, k, rng(sd));
+    h.islands.forEach((isl, i) => {
+      const P = m => h.pos[i][isl.indexOf(m)], E = [...h.adj[i]].flatMap(([a, bs]) => bs.filter(b => b > a).map(b => [a, b]));
+      for (const [a, b] of E) for (const [c, e] of E) assert(!crosses(P(a), P(b), P(c), P(e)), `cross seed ${sd}`);
+      const seen = new Set([isl[0]]);
+      for (const m of seen) h.adj[i].get(m).forEach(x => seen.add(x));
+      assert.equal(seen.size, isl.length, `disconnected ${ch[i]} seed ${sd}`);
+    });
+  }
 
 for (const p of [{ repeat: 0, momentum: 0 }, { repeat: 0.5, momentum: 1 }]) {
   const walk = makeWalker(g, p, r);

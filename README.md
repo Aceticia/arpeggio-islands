@@ -2,7 +2,7 @@
 
 A browser trainer for arpeggiating through chord changes. You type a progression and get a random path through each chord's tones. A metronome keeps time, and the microphone checks that you play the right note on the beat.
 
-Each chord is drawn as an **island**: a column holding every one of its tones in your range, linked to its neighbours. **Bridges** connect each note to nearby notes in the next chord, so the path moves through the changes by smooth voice leading. A bouncing ball shows the next note.
+Each chord is drawn as an **island**: every one of its tones in your range, scattered at random positions so that pitch order is lost. Each note links to a few of its nearest neighbours on screen, with no crossing lines, so a step along a link can be any interval rather than just up or down the arpeggio. **Bridges** connect each note to two notes of the next chord. A bouncing ball shows the next note, and **New graph** reshuffles everything.
 
 No build step and no dependencies: plain HTML plus one ES module.
 
@@ -26,10 +26,10 @@ Then open <http://localhost:8765>. Any static file server works. Open the app th
 | --- | --- |
 | BPM / Notes | Tempo and note value (whole note to 16th notes, plus triplets). One bar per chord. |
 | Mode | **Guided path**: play the exact note shown. **Free**: any tone of the current chord counts. |
-| Leaps | 0 = stepwise only. Higher values allow skipping notes within a chord and wider jumps between chords. |
+| Links | How many nearest notes each note links to (1–5). More links give more choices at each step. |
 | Repeats | Chance of playing the same note again. |
 | Momentum | Chance of continuing in the same direction. |
-| New graph | Reroll the random links. |
+| New graph | Reshuffle note positions and links. |
 | Listen & score | Use the mic to score each note as hit, wrong or silent, and measure your reaction time. |
 | Play aloud | A synth plays the target notes (in free mode, the chord on each bar). Scoring turns off while this is on. |
 | Record audio | Records the session. A download link appears on the result card. |

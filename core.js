@@ -51,10 +51,13 @@ export function rng(seed) { // mulberry32
   };
 }
 
-// Islands = each chord's tones in range. Within an island, pitch-neighbours are always linked and a link
-// skipping k notes exists with prob leap^k. Bridges go from each note to the next chord's island: the 2
-// nearest notes always, the r-th nearest with prob leap^(r-1). So leap=0 is pure stepwise voice leading.
-export function buildGraph(chords, low, octaves, leap, rand) {
+// Islands = each chord's tones in range, scattered at random 2D points so pitch order means nothing.
+// Within an island, pairs are tried shortest-first and linked if the line crosses no other link and
+// clears every other note, and one end is among the other's `links` nearest -- or the link joins two
+// separate pieces, so the island stays connected. Bridges go from each note to the 2 notes of the next
+// island at the nearest height. Positions are in SVG px: island i spans x 0..BOX.w, y 0..g.h.
+export const BOX = { w: 180, gap: 120, clear: 22 };
+export function buildGraph(chords, low, octaves, links, rand) {
   const high = low + 12 * octaves;
   const islands = chords.map(c => {
     const a = [];
@@ -62,19 +65,51 @@ export function buildGraph(chords, low, octaves, leap, rand) {
     if (!a.length) throw Error(`No ${c.name} tones in range`);
     return a;
   });
-  const adj = islands.map(isl => {
-    const g = new Map(isl.map(m => [m, []]));
-    for (let a = 0; a < isl.length; a++)
-      for (let b = a + 1; b < isl.length; b++)
-        if (rand() < leap ** (b - a - 1)) { g.get(isl[a]).push(isl[b]); g.get(isl[b]).push(isl[a]); }
-    return g;
-  });
+  const h = Math.max(160, 30 * Math.max(...islands.map(a => a.length)));
+  const pos = islands.map(isl => scatter(isl.length, BOX.w, h, rand));
+  const adj = islands.map((isl, i) => link(isl, pos[i], links));
   const bridges = islands.map((isl, i) => {
-    const next = islands[(i + 1) % islands.length];
-    return new Map(isl.map(m => [m,
-      [...next].sort((x, y) => Math.abs(x - m) - Math.abs(y - m)).filter((_, r) => rand() < leap ** (r - 1))]));
+    const j = (i + 1) % islands.length, dy = (a, b) => Math.abs(pos[j][b][1] - pos[i][a][1]);
+    return new Map(isl.map((m, a) => [m, islands[j].map((_, b) => b).sort((x, y) => dy(a, x) - dy(a, y)).slice(0, 2).map(b => islands[j][b])]));
   });
-  return { islands, adj, bridges, low, high };
+  return { islands, pos, adj, bridges, low, high, h };
+}
+
+// Best-candidate sampling: random points that don't clump.
+function scatter(n, w, h, rand) {
+  const p = [];
+  for (let k = 0; k < n; k++) {
+    let best, bd = -1;
+    for (let c = 0; c < 30; c++) {
+      const q = [rand() * w, rand() * h], d = Math.min(Infinity, ...p.map(o => Math.hypot(o[0] - q[0], o[1] - q[1])));
+      if (d > bd) { bd = d; best = q; }
+    }
+    p.push(best);
+  }
+  return p;
+}
+
+const orient = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+export const crosses = (a, b, c, d) => orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0;
+const segDist = (p, a, b) => {
+  const dx = b[0] - a[0], dy = b[1] - a[1], t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
+};
+
+function link(isl, p, k) {
+  const n = isl.length, d = (a, b) => Math.hypot(p[a][0] - p[b][0], p[a][1] - p[b][1]);
+  const idx = [...Array(n).keys()], near = idx.map(a => idx.filter(b => b !== a).sort((x, y) => d(a, x) - d(a, y)).slice(0, k));
+  const pairs = idx.flatMap(a => idx.filter(b => b > a).map(b => [a, b])).sort(([a, b], [c, e]) => d(a, b) - d(c, e));
+  const comp = [...idx], find = a => comp[a] === a ? a : (comp[a] = find(comp[a]));
+  const edges = [], g = new Map(isl.map(m => [m, []]));
+  for (const [a, b] of pairs) {
+    if (find(a) === find(b) && !near[a].includes(b) && !near[b].includes(a)) continue;
+    if (edges.some(([c, e]) => crosses(p[a], p[b], p[c], p[e]))) continue; // shared endpoint -> orient 0 -> no cross
+    if (idx.some(c => c !== a && c !== b && segDist(p[c], p[a], p[b]) < BOX.clear)) continue;
+    edges.push([a, b]); comp[find(a)] = find(b);
+    g.get(isl[a]).push(isl[b]); g.get(isl[b]).push(isl[a]);
+  }
+  return g;
 }
 
 // Returns ci => next midi note. Call with the chord index of each slot, in order (chords loop 0..n-1).
